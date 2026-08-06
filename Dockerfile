@@ -53,6 +53,38 @@ RUN apt-get update \
         fonts-liberation pandoc poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
+# `az`, for the cloud-diagnostic skills: VPN gateway connection state, effective
+# route tables, and Azure Monitor metrics. Same bake-it-in argument as the block
+# above, and it costs ~800 MB installed, so it is worth being explicit about what
+# is NOT here for the same skills: ping, iptables and conntrack stay out. A pod is
+# the wrong vantage point to measure another host's network from, so those would
+# only produce confident nonsense measured against the pod's own path. `jq` stays
+# out too, since `az --query` is JMESPath already.
+#
+# NOT from PyPI, on size and on currency both. `pip install azure-cli` lands
+# 2.66.2 and unpacks to ~1.1 GB, larger than this deb and two years behind it.
+# `uv tool install azure-cli` is worse: it walks all the way back to 2.0.67
+# (2019), which dies at startup on `time.clock()`, removed in Python 3.8. The
+# cause is azure-cli pinning the pre-release `azure-batch==15.0.0b1` -- pip
+# accepts an explicitly pinned pre-release, uv refuses one unless
+# `--prerelease=allow`, so it backtracks until it finds a release old enough not
+# to want it.
+#
+# The suite is pinned to bookworm deliberately: this image is trixie, and the
+# vendor publishes no trixie suite for azure-cli (404, checked 2026-08). That is
+# also why the vendor's own install script cannot be used here -- it derives the
+# suite from `lsb_release -cs` and would 404. `signed-by` points at the armored
+# key directly, which apt has accepted since bookworm, so no gnupg is needed.
+RUN install -d /etc/apt/keyrings \
+    && curl -fsSL https://packages.microsoft.com/keys/microsoft.asc \
+         -o /etc/apt/keyrings/microsoft.asc \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/microsoft.asc] \
+https://packages.microsoft.com/repos/azure-cli/ bookworm main" \
+         > /etc/apt/sources.list.d/azure-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends azure-cli \
+    && rm -rf /var/lib/apt/lists/*
+
 # Node libraries the docx/pptx skills `require()` directly. Installed globally
 # with an explicit prefix (rather than relying on npm's default) so NODE_PATH
 # can name the resulting dir: the skills write throwaway scripts under the
