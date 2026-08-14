@@ -95,6 +95,9 @@ class StubChat:
     ):
         return None
 
+    async def download(self, url, dest):
+        return None
+
     async def react(self, channel, ts, emoji):
         return None
 

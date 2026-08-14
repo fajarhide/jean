@@ -77,6 +77,10 @@ Create a Slack app (Socket Mode, not HTTP events) with these OAuth scopes:
 - `channels:read` -- to turn `#channel-name` into the id the API wants
 - `im:history` -- to see DMs
 - `files:write` -- to upload files
+- `files:read` -- to fetch a file somebody attached, so jean can open a
+  screenshot instead of asking what it says. It must be a **bot** token scope;
+  the user-token `files:read` on the same page is a different grant and the bot
+  token still comes back without it
 - `reactions:write` -- to react/unreact
 - `assistant:write` *(optional)* -- shows the "is thinking..." status in
   Slack's AI-assistant UI; jean degrades gracefully (silently) without it

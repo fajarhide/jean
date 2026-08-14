@@ -316,6 +316,10 @@ async def run() -> None:
         bot_id=bot_id,
         soul_provider=soul_provider,
         chat=chat,
+        # Inside the CLI's cwd on purpose: the agent reads an attachment with the
+        # same Read it uses for its own workspace, and rm of it stays inside the
+        # path risk.py already treats as scratch.
+        attachments_dir=settings.home / "workspaces" / "attachments",
     )
     register(app, gw)
 

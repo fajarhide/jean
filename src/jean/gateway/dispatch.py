@@ -15,12 +15,26 @@ _AUTHOR_TAG_RE = re.compile(r"<\s*slack-author\b[^>]*>", re.IGNORECASE)
 
 @dataclass
 class Attachment:
+    """A file attached to the message, once it is on this pod's disk.
+
+    `error` replaces `path` when the file could not be fetched. Both are
+    rendered, because an attachment the agent cannot open still has to reach it:
+    dropping it leaves the agent answering as if the message carried no file at
+    all, while the human is looking at one."""
+
     name: str
     path: str
+    error: str | None = None
 
 
 class _HandlesTurns(Protocol):
     async def handle(self, channel: str, thread_ts: str, text: str) -> None: ...
+
+
+def _attachment_tag(a: Attachment) -> str:
+    if a.error:
+        return f'<attachment name="{a.name}" error="{a.error}"/>'
+    return f'<attachment name="{a.name}" path="{a.path}"/>'
 
 
 def build_turn_text(
@@ -49,9 +63,7 @@ def build_turn_text(
         parts.append(f'<slack-author id="{author_id}"/>')
     parts.append(body)
     if attachments:
-        parts.append(
-            "\n".join(f'<attachment name="{a.name}" path="{a.path}"/>' for a in attachments)
-        )
+        parts.append("\n".join(_attachment_tag(a) for a in attachments))
     return "\n\n".join(parts)
 
 

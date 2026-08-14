@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import re
+from pathlib import Path
 from typing import Any
 
+import aiohttp
 from slack_sdk.errors import SlackApiError
 
 from jean.ports import ChatReadError, Message
@@ -54,6 +57,28 @@ class SlackSurface:
         # name -> id, for this worker's lifetime. Channel ids are stable, so a
         # cold miss costs one paged scan per worker rather than one per read.
         self._channel_ids: dict[str, str] = {}
+
+    async def download(self, url: str, dest: str) -> None:
+        """Fetch a `url_private` onto local disk. Not a Web API call: the file
+        host wants the same bot token as a bearer header, and it answers 200
+        with an HTML login page instead of 401 when the token lacks
+        `files:read`, so a non-file content type is treated as the failure it
+        is."""
+        token = getattr(self._client, "token", None)
+        headers = {"Authorization": f"Bearer {token}"} if token else {}
+        async with (
+            aiohttp.ClientSession(headers=headers) as session,
+            session.get(url) as response,
+        ):
+            response.raise_for_status()
+            if response.content_type.startswith("text/html"):
+                raise ChatReadError(
+                    "not_authed",
+                    "Slack served a login page, not the file: the bot token "
+                    "is missing the files:read scope",
+                )
+            body = await response.read()
+        await asyncio.to_thread(Path(dest).write_bytes, body)
 
     async def reply(self, channel: str, thread_ts: str, text: str) -> str:
         mrkdwn = md_to_mrkdwn(text)

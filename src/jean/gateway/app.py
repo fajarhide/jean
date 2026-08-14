@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any, Protocol
 
 from jean.approval.gate import ACTION_RE
-from jean.gateway.dispatch import dispatch
+from jean.gateway.attachments import InboundFile, fetch_attachments
+from jean.gateway.dispatch import Attachment, dispatch
 from jean.gateway.engagement import decide, mentions_in
 from jean.persona.model import SoulData
 from jean.ports import ChatSurface, SessionStore
@@ -70,6 +72,7 @@ class Gateway:
         bot_id: str,
         soul_provider: Callable[[], SoulData],
         chat: ChatSurface | None = None,
+        attachments_dir: Path | None = None,
     ) -> None:
         self._store = store
         self._manager = manager
@@ -79,6 +82,9 @@ class Gateway:
         # Optional: the ack is a nicety, and the single-process/test wiring may
         # not have a surface. Never let its absence decide whether a turn runs.
         self._chat = chat
+        # Where an attached file is put for the agent to read. Under the CLI's
+        # own cwd, so a Read of it needs no permission the agent lacks.
+        self._attachments_dir = attachments_dir
 
     async def on_mention(
         self,
@@ -88,6 +94,7 @@ class Gateway:
         text: str,
         author_id: str | None,
         message_ts: str | None = None,
+        files: Sequence[InboundFile] = (),
     ) -> None:
         """Owns bot-@mentions: routes through `decide()` so authorization (the
         blocked-user check) and partner assignment have one source of truth,
@@ -101,6 +108,7 @@ class Gateway:
             author_id=author_id,
             is_dm=False,
             message_ts=message_ts,
+            files=files,
         )
 
     async def on_message(
@@ -111,6 +119,7 @@ class Gateway:
         author_id: str | None,
         is_dm: bool,
         message_ts: str | None = None,
+        files: Sequence[InboundFile] = (),
     ) -> None:
         if self._bot_id in mentions_in(text):
             # `on_mention` (app_mention event) already engages + dispatches
@@ -123,6 +132,7 @@ class Gateway:
             author_id=author_id,
             is_dm=is_dm,
             message_ts=message_ts,
+            files=files,
         )
 
     async def _engage(
@@ -134,6 +144,7 @@ class Gateway:
         author_id: str | None,
         is_dm: bool,
         message_ts: str | None = None,
+        files: Sequence[InboundFile] = (),
     ) -> None:
         partner = await self._store.get_partner(channel, thread_ts)
         decision = decide(
@@ -172,7 +183,27 @@ class Gateway:
             channel=channel,
             thread_ts=thread_ts,
             text=text,
+            attachments=await self._attachments(channel, thread_ts, files),
             author_id=author_id,
+        )
+
+    async def _attachments(
+        self, channel: str, thread_ts: str, files: Sequence[InboundFile]
+    ) -> list[Attachment]:
+        """Fetched only once engagement has said yes: a bystander's upload must
+        cost no bandwidth and no disk, the same way it costs no turn."""
+        if not files:
+            return []
+        if self._chat is None or self._attachments_dir is None:
+            logger.warning(
+                "%d file(s) on %s/%s ignored: no chat surface or attachments dir wired",
+                len(files),
+                channel,
+                thread_ts,
+            )
+            return []
+        return await fetch_attachments(
+            self._chat, files, dest_dir=self._attachments_dir / channel / thread_ts
         )
 
     async def _ack(self, channel: str, message_ts: str | None) -> None:
@@ -211,6 +242,21 @@ class Gateway:
         return f"unknown command {command!r}"
 
 
+def _files_in(event: dict) -> list[InboundFile]:
+    """Slack's file blobs, narrowed to what the gateway needs. `url_private` is
+    absent on a file the app cannot see; that case is reported to the agent
+    rather than dropped (see gateway/attachments.py)."""
+    return [
+        InboundFile(
+            id=str(f.get("id") or ""),
+            name=str(f.get("name") or f.get("title") or "file"),
+            url=str(f.get("url_private") or ""),
+            size=int(f.get("size") or 0),
+        )
+        for f in event.get("files") or []
+    ]
+
+
 def register(app: Any, gw: Gateway) -> None:
     """Wire the Gateway into a slack_bolt AsyncApp. Not unit-tested (it's the
     bolt seam) -- exercise it via a running app; Gateway's methods above carry
@@ -233,11 +279,16 @@ def register(app: Any, gw: Gateway) -> None:
             # `ts` is THIS message; `thread_ts` is the thread's opening message.
             # The ack belongs on the message that was actually addressed to jean.
             message_ts=event.get("ts"),
+            files=_files_in(event),
         )
 
     @app.event("message")
     async def _on_message(event: dict) -> None:
-        if event.get("subtype") is not None or event.get("bot_id") is not None:
+        # Subtypes are joins, edits and other machinery, not somebody talking --
+        # except `file_share`, which is how a person drops a screenshot as their
+        # follow-up. Dropping that one means a thread partner uploads an image
+        # and jean never sees the message at all.
+        if event.get("subtype") not in (None, "file_share") or event.get("bot_id") is not None:
             return
         channel = event["channel"]
         thread_ts = event.get("thread_ts", event["ts"])
@@ -249,6 +300,7 @@ def register(app: Any, gw: Gateway) -> None:
             event.get("user"),
             is_dm,
             message_ts=event.get("ts"),
+            files=_files_in(event),
         )
 
     @app.action(ACTION_RE)
